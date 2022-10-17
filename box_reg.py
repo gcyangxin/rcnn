@@ -4,7 +4,8 @@
 from matplotlib.backend_tools import ToolXScale
 import numpy as np
 import torch
-from torch import nn
+from torch import det, nn
+import torchvision
 # from torchvision.models import AlexNet
 from torch.utils.data import TensorDataset,DataLoader,sampler
 from rcnn_master import load_from_npy,load_test_proposals
@@ -84,10 +85,10 @@ fine_tunning_dict = {k: model_dict[k] for k, v in myAlex.state_dict().items() if
 myAlex.load_state_dict(fine_tunning_dict,strict=True)
 
 #分类模型
-svc_mod = joblib.load('/root/data/Downloads/svc_mod_1.model')
+svc_mod = joblib.load('/root/data/Downloads/svc_mod_1000.model')
 
 #回归模型
-ridge_reg=joblib.load('/root/data/Downloads/reg_1.m')
+ridge_reg=joblib.load('/root/data/Downloads/reg_1000.m')
 
 
 #因为torch接受(b,c,w,h),所以更改维度
@@ -128,6 +129,36 @@ def weights(xArr, yArr, lam=1000):
     ws = rxTx.I * xMat.T * yMat
     return ws
 
+def py_cpu_nms(dets, thresh):
+
+    print('NMS',dets.shape)
+    x1 = dets[:, 0]
+    y1 = dets[:, 1]
+    x2 = dets[:, 2]
+    y2 = dets[:, 3]
+    scores = dets[:, 4]
+    areas = (x2-x1+1)*(y2-y1+1)
+    res = []
+    index = scores.argsort()[::-1]
+    while index.size>0:
+        i = index[0]
+        res.append(i)
+        x11 = np.maximum(x1[i],x1[index[1:]])
+        y11 = np.maximum(y1[i], y1[index[1:]])
+        x22 = np.minimum(x2[i],x2[index[1:]])
+        y22 = np.minimum(y2[i],y2[index[1:]])
+
+        w = np.maximum(0,x22-x11+1)
+        h = np.maximum(0,y22-y11+1)
+
+        overlaps = w * h
+        iou = overlaps/(areas[i]+areas[index[1:]]-overlaps)
+
+        idx = np.where(iou<=thresh)[0]
+        index = index[idx+1]
+    #    print(res)
+    return dets[res]
+
 
 
 def test_class_run(threshold=0.5, is_svm=False, save=False):
@@ -139,8 +170,9 @@ def test_class_run(threshold=0.5, is_svm=False, save=False):
         for line in img_paths:#
             labels = []
             images = []
-            # line='/root/deeplearn/archive/data/testing_images/vid_5_26620.jpg'
-            line='/root/deeplearn/archive/data/training_images/vid_4_740.jpg' #train image
+            line='/root/deeplearn/archive/data/testing_images/vid_5_27620.jpg'#test
+            line='/root/deeplearn/archive/data/testing_images/vid_5_26620.jpg'
+            # line='/root/deeplearn/archive/data/training_images/vid_4_720.jpg' #train image
             print(line)
             saving_name=os.path.basename(line)
             # tmp0 = image address
@@ -154,6 +186,8 @@ def test_class_run(threshold=0.5, is_svm=False, save=False):
                                 img, scale=500, sigma=0.9, min_size=10)
             print('RegionPropasl',len(regions))
             n=0
+            boxes=[]
+            scores=[]
             for r in regions:
                 # excluding same rectangle (with different segments)
                 # excluding small regions
@@ -201,30 +235,42 @@ def test_class_run(threshold=0.5, is_svm=False, save=False):
                 pred_x1,pred_x2=myAlex(img_float.to(torch.float32))#Bx9216,Bx4096 对应回归和分类的特征
 
                 classfiation=svc_mod.predict(pred_x2.numpy()).astype('int').item()
-
-                if classfiation <1:
+                score=svc_mod.predict_proba(pred_x2.numpy())
+                # print(score)
+                max_score=score.max()
+                if classfiation <1 or max_score<0.7:
                     continue
                 else:
-                    #输出分类结果
+                    #输出分类结果                    
                     # cv2.imwrite(os.path.join(saving_path,saving_name[:-4]+f'_{n}.jpg'),resized_proposal_img)
                     n+=1
                     # cv2.circle(img,(proposal_vertice[0],proposal_vertice[1]),3,(0,255,0),thickness=-1)
                     d_xywh=ridge_reg.predict(pred_x1).squeeze() 
-                    print('proposal_vertice',proposal_vertice,sep='\n')
-                    print('cxcywh',cxcywh,'d_xywh',d_xywh,sep='\n') 
+                    # print('proposal_vertice',proposal_vertice,sep='\n')
+                    # print('cxcywh',cxcywh,'d_xywh',d_xywh,sep='\n') 
                     pred_x=cxcywh[2]*d_xywh[0]+cxcywh[0]
                     pred_y=cxcywh[3]*d_xywh[1]+cxcywh[1]
                     pred_w=cxcywh[2]*np.exp(d_xywh[2])
                     pred_h=cxcywh[3]*np.exp(d_xywh[3]) 
+                    box=(pred_x-pred_w/2,pred_y-pred_h/2,pred_x+pred_w/2,pred_y+pred_h/2,max_score)
+                    boxes.append(box)
 
-                    pred_x=int(pred_x)
-                    pred_y=int(pred_y)
-                    pred_w=int(pred_w)
-                    pred_h=int(pred_h)
+                    # pred_x=int(pred_x)
+                    # pred_y=int(pred_y)
+                    # pred_w=int(pred_w)
+                    # pred_h=int(pred_h)
                     #RP box
-                    cv2.rectangle(img,(proposal_vertice[0],proposal_vertice[1]),(proposal_vertice[4],proposal_vertice[5]),(255,0,0))
+                    # cv2.rectangle(img,(proposal_vertice[0],proposal_vertice[1]),(proposal_vertice[4],proposal_vertice[5]),(255,0,0))
                     #回归后的box
-                    cv2.rectangle(img,(pred_x-pred_w//2,pred_y-pred_h//2),(pred_x+pred_w//2,pred_y+pred_h//2),(0,0,255))
+                    # cv2.rectangle(img,(pred_x-pred_w//2,pred_y-pred_h//2),(pred_x+pred_w//2,pred_y+pred_h//2),(0,0,255))
+            #NMS
+            rets=py_cpu_nms(np.array(boxes),0.6)
+            # print(rets)
+            #回归后的box
+            for bbox in rets:
+                cv2.rectangle(img, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0,0,255), 1)
+                #  cv2.rectangle(img,(pred_x-pred_w//2,pred_y-pred_h//2),(pred_x+pred_w//2,pred_y+pred_h//2),)
+
         print('saving', os.path.join(saving_path,saving_name))
         cv2.imwrite(os.path.join(saving_path,saving_name[:-4]+'_2000.jpg'),img)
 def train_run():
@@ -293,7 +339,7 @@ def train_run():
 #测试训练集分类是否正确  正确
 # train_run()    
 #分类结果
-saving_path='./box_rect/test_class'
+# saving_path='./box_rect/test_class'
 #回归结果
 saving_path='./box_rect/test_reg'
 if not os.path.exists(saving_path):
